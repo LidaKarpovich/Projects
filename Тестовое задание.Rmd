@@ -1,0 +1,146 @@
+---
+title: "Тестовое задание"
+author: "Карпович Лидия"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(readr)
+library(tidyverse)
+library(ggpubr)
+library(dplyr)
+library(sf)
+library(maptools)
+library(ggplot2)
+library(pROC)
+library(sp)
+```
+
+#чтение данных
+```{r}
+data <- read_delim("C:/Users/79214/Downloads/forFBpost.csv", show_col_types = FALSE)
+head(data)
+summary(data)
+```
+
+#распределение по городам
+```{r}
+#посчитаем коэффициент корреляции численности населения во времени - будем считать его показателем прироста (коэффициент ближе к 1) и убыли (коэффициент ближе к -1)
+cor_coef <- c()
+
+#построим графики по городам с реальными данными, графики не выводим из-за громоздкости и неинформативности 
+for (x in unique(data$Город))
+{
+  plot <- data %>% filter(`Город` == x & year != 0 & fact != 0)
+  cor <- cor(plot$year, plot$fact)
+  cor_coef <- c(cor_coef, cor)
+  plot <- plot %>% ggplot(aes(x=year, y=fact)) + 
+  geom_point(size=3) +
+  ggtitle(x)
+  #print(plot)
+}
+```
+
+#информация по городам
+```{r}
+#создадим новый датафрейм с информацией по убыли/приросту населения
+city_data <- as.data.frame(unique(data$Город)) %>% 
+  rename(`Город` = `unique(data$Город)`) %>%
+  mutate(`Корреляция` = cor_coef)
+  
+#названия городов с прибылью населения
+city_data %>%
+  filter(`Корреляция` > 0)
+
+#названия городов с убылью населения
+city_data %>%
+  filter(`Корреляция` < 0)
+
+```
+
+#Насколько хорошо модельные данные описывают реальные
+```{r, warning=FALSE, error=FALSE, message=FALSE, fig.height=7}
+#для каждого города построим графики с указанием реальных (красным цветом) и модельных данных, а также оценим мощность модели с помощью ROC аналиса, графики построены, но не выведены в rmarkdown из-за большого количества и неинформативности
+auc_coef <- c()
+
+for (x in unique(data$Город))
+{
+  new_data <- data %>% filter(`Город` == x & year != 0 & fact != 0 )
+  plot <- new_data %>%
+  ggplot(aes(x = year)) +
+  geom_line(aes(y = fact), color = "red") +
+  geom_line(aes(y = `Модель`), color = "blue")+
+  scale_colour_manual("Данные", values = c(Фактические="red", Модельные="blue")) +
+  theme_minimal() +
+  ggtitle(x) +
+  labs(x = "Год", y = "Численность")
+  #print(plot)
+  rocobj <- roc(new_data$fact, new_data$Модель)
+  auc <- round(auc(new_data$fact, new_data$Модель), 4)
+  auc_coef <- c(auc_coef, auc)
+  #plot(ggroc(rocobj, colour = 'steelblue', size = 2 ) + ggtitle( paste0('ROC Curve', '(AUC =', auc, ')')))
+}
+
+#внесем значения auc в таблицу с городами и посмотрим распределение качественности модели
+city_data <- city_data %>%
+  mutate(`auc` = auc_coef)
+
+#гистограмма точноти модельных данных, под количетсвом подразумевается количество городов с определенным значением AUC
+hist(city_data$auc, labels = T,  main = 'Гистограмма точности модели по городам',
+  ylab = 'Количество городов', xlab = "Значение AUC")
+
+```
+
+```{r, warning=FALSE}
+#отобразим города на карте России
+ci <- c(unique(data$Город))
+
+#чтобы нанести данные на карту, скачаем с сайта kaggle данные с координатами интересующих нас городов https://www.kaggle.com/datasets/senatorov1/coordinates-of-russian-cities
+city_coordinates <- read.csv("C:/Users/79214/Downloads/city.csv") 
+
+#города дубликаты
+out_cities <- c("184250", "298676", "652420", "662970", "431260", "164170", "442680", "613341", "301205")
+
+#оставляем нужные нам города, убираем дубликаты
+city_coordinates <- city_coordinates %>%
+  subset(., city %in% ci) %>%
+  subset(., !(postal_code %in% out_cities)) %>%
+  select(city, geo_lat, geo_lon, population) %>%
+  left_join(., city_data, by = c("city" = "Город")) %>%
+  rename(., "corr" = "Корреляция")
+
+#скачаем карту России https://gadm.org/download_country.html
+rus <- readShapePoly("C:/Users/79214/Downloads/gadm41_RUS_shp/gadm41_RUS_1.shp")
+
+#присоединим Чукотку на свое место
+for(i in 1:length(rus@polygons)){
+  for(j in 1:length(rus@polygons[[i]]@Polygons)){
+    rus@polygons[[i]]@Polygons[[j]]@coords[,1]<- sapply(rus@polygons[[i]]@Polygons[[j]]@coords[,1], function(x){
+        if(x < 0){
+          x<-359.999+x
+        }
+        else{x}
+      })
+  }
+}
+#добавим Крым
+crimea <- readShapePoly("C:/Users/79214/Downloads/gadm41_UKR_shp/gadm41_UKR_1.shp") %>% subset(., NAME_1 == "Crimea")
+rus <- rus %>% rbind(., crimea)
+
+rus <- st_as_sf(rus)
+
+#строим график
+rus_plot <- ggplot(rus) +
+  geom_sf() +
+  geom_point(data = city_coordinates, aes(x = geo_lon, y = geo_lat, color = corr)) +
+  theme_bw() + 
+  scale_color_continuous(low = "blue", high = "red") +
+  labs(x = "Географическая долгота", y = "Географическая широта", subtitle = "Распределение (прирост/убыль) населения по городам России", col = "Прирост - Убыль")
+  
+#на графике визуально отмечены города, цвет указывает на состояние численности: красным - прибыль населения, синим - убыль. Можно сделать вывод о прибыли населения в прибрежном районе Черного моря, Санкт-Петербурге и Ленинградской области, Москве и Крыму. Снижение численности наблюдается в центральной России
+rus_plot
+
+```
+
